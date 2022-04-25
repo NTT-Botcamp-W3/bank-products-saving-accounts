@@ -1,12 +1,15 @@
 package com.bank.bootcamp.savingacounts.service;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
 import java.util.Optional;
 import java.util.function.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.util.ObjectUtils;
+import com.bank.bootcamp.savingacounts.dto.BalanceDTO;
 import com.bank.bootcamp.savingacounts.dto.CreateTransactionDTO;
 import com.bank.bootcamp.savingacounts.entity.Account;
 import com.bank.bootcamp.savingacounts.entity.Transaction;
@@ -16,6 +19,7 @@ import com.bank.bootcamp.savingacounts.repository.AccountRepository;
 import com.bank.bootcamp.savingacounts.repository.TransactionRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 @Service
@@ -67,19 +71,81 @@ public class AccountService {
           if (balance + createTransactionDTO.getAmount() < 0)
             return Mono.error(new BankValidationException("Insuficient balance"));
           else {
-            try {
-              var transaction = objectMapper.readValue(objectMapper.writeValueAsString(createTransactionDTO), Transaction.class);
-              transaction.setOperationNumber(nextSequenceService.getNextSequence(TransactionSequences.class.getSimpleName()));
-              transaction.setRegisterDate(LocalDateTime.now());
-              return transactionRepository.save(transaction);
-            } catch (Exception ex) {
-              logger.error("Error en mapper", ex);
-              return Mono.error(ex);
-            }
+            return nextSequenceService.getNextSequence(TransactionSequences.class.getSimpleName()).<Transaction>flatMap(nextSeq -> {
+              try {
+                var transaction = objectMapper.readValue(objectMapper.writeValueAsString(createTransactionDTO), Transaction.class);
+                transaction.setOperationNumber(nextSeq);
+                transaction.setRegisterDate(LocalDateTime.now());
+                return transactionRepository.save(transaction);
+              } catch (Exception ex) {
+                logger.error("Error en mapper", ex);
+                return Mono.error(ex);
+              }
+            });
+            
           }
+        });
+  }
+
+  public Mono<BalanceDTO> getBalanceByAccountId(String accountId) {
+    return Mono.just(accountId)
+    .switchIfEmpty(Mono.error(new BankValidationException("Account Id is required")))
+    .flatMap(accId -> accountRepository.findById(accId))
+    .switchIfEmpty(Mono.error(new BankValidationException("Account not found")))
+    .flatMap(account -> {
+      var x = transactionRepository.getBalanceByAccountId(account.getId()).switchIfEmpty(Mono.just(0d))
+          .flatMap(balance -> {
+            var yearMonth = YearMonth.from(LocalDateTime.now());
+            var currentMonthStart = yearMonth.atDay(1).atStartOfDay();
+            var currentMonthEnd = yearMonth.atEndOfMonth().atTime(23, 59, 59);
+            
+            return transactionRepository.findByAccountIdAndRegisterDateBetween(accountId, currentMonthStart, currentMonthEnd)
+                .count().switchIfEmpty(Mono.just(0L))
+                .map(qty -> {
+                  var balanceDTO = new BalanceDTO();
+                  balanceDTO.setAccountId(account.getId());
+                  balanceDTO.setMonthlyMovementLimit(account.getMonthlyMovementLimit());
+                  balanceDTO.setMonthlyMovementsAvailable(account.getMonthlyMovementLimit() - qty);
+                  //balanceDTO.setAccountNumber(account.getAccountNumber());
+                  balanceDTO.setType("Saving Account");
+                  balanceDTO.setAmount(balance);
+                  return balanceDTO;
+                });
+          });
+      return x;
+    });
+  }
+
+  public Flux<BalanceDTO> getBalancesByCustomerId(String customerId) {
+    return Mono.just(customerId)
+    .switchIfEmpty(Mono.error(new BankValidationException("Customer ID is required")))
+    .flatMap(custId -> accountRepository.findByCustomerId(custId)
+        .flatMap(account -> getBalanceByAccountId(account.getId())))
+    .flux();
+  }
+
+  public Flux<Account> getAccountsByCustomer(String customerId) {
+    return Mono.just(customerId)
+        .switchIfEmpty(Mono.error(new BankValidationException("Customer ID is required")))
+        .flatMap(custId -> {
+          return accountRepository.findByCustomerId(custId);
         })
-        
-      ;
-    
+        .flux();
+  }
+
+  public Flux<Transaction> getTransactionsByAccountIdAndPeriod(String accountId, LocalDate period) {
+    return Flux.just(accountId)
+        .switchIfEmpty(Flux.error(new BankValidationException("Account Id is required")))
+        .map(accId -> {
+          if (Optional.ofNullable(period).isEmpty())
+            return Flux.error(new BankValidationException("Period is required"));
+          else
+            return accId;
+        }).flatMap(accId -> {
+          var yearMonth = YearMonth.from(period);
+          var currentMonthStart = yearMonth.atDay(1).atStartOfDay();
+          var currentMonthEnd = yearMonth.atEndOfMonth().atTime(23, 59, 59);
+          return transactionRepository.findByAccountIdAndRegisterDateBetween(accountId, currentMonthStart, currentMonthEnd);
+        });
   }
 }

@@ -3,6 +3,7 @@ package com.bank.bootcamp.savingacounts;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeAll;
@@ -16,6 +17,7 @@ import com.bank.bootcamp.savingacounts.repository.TransactionRepository;
 import com.bank.bootcamp.savingacounts.service.AccountService;
 import com.bank.bootcamp.savingacounts.service.NextSequenceService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
@@ -75,7 +77,7 @@ public class SavingAcountsApplicationTests {
     transactionSaved.setOperationNumber(1);
     transactionSaved.setRegisterDate(LocalDateTime.now());
     
-    when(nextSequenceService.getNextSequence("TransactionSequences")).thenReturn(1);
+    when(nextSequenceService.getNextSequence("TransactionSequences")).thenReturn(Mono.just(1));
     when(transactionRepository.getBalanceByAccountId(accountId)).thenReturn(Mono.just(0d));
     when(accountRepository.findById(accountId)).thenReturn(Mono.just(new Account()));
     Mockito.doReturn(Mono.just(transactionSaved)).when(transactionRepository).save(Mockito.any());
@@ -100,7 +102,7 @@ public class SavingAcountsApplicationTests {
     transactionSaved.setOperationNumber(1);
     transactionSaved.setRegisterDate(LocalDateTime.now());
     
-    when(nextSequenceService.getNextSequence("TransactionSequences")).thenReturn(1);
+    when(nextSequenceService.getNextSequence("TransactionSequences")).thenReturn(Mono.just(1));
     when(transactionRepository.getBalanceByAccountId(accountId)).thenReturn(Mono.just(0d));
     when(accountRepository.findById(accountId)).thenReturn(Mono.just(new Account()));
     Mockito.doReturn(Mono.just(transactionSaved)).when(transactionRepository).save(Mockito.any());
@@ -123,13 +125,43 @@ public class SavingAcountsApplicationTests {
     transactionSaved.setOperationNumber(1);
     transactionSaved.setRegisterDate(LocalDateTime.now());
     
-    when(nextSequenceService.getNextSequence("TransactionSequences")).thenReturn(1);
+    when(nextSequenceService.getNextSequence("TransactionSequences")).thenReturn(Mono.just(1));
     when(transactionRepository.getBalanceByAccountId(accountId)).thenReturn(Mono.just(0d));
     when(accountRepository.findById(accountId)).thenReturn(Mono.empty()); // inexistent account
     Mockito.doReturn(Mono.just(transactionSaved)).when(transactionRepository).save(Mockito.any());
     
     var mono = accountService.createTransaction(createTransactionDTO);
     StepVerifier.create(mono).expectError().verify();
+  }
+  
+  @Test
+  public void getBalanceTest() {
+    var accountId = "account_123";
+    var account = new Account();
+    account.setId(accountId);
+    account.setMonthlyMovementLimit(5);
+    
+    when(transactionRepository.getBalanceByAccountId(accountId)).thenReturn(Mono.just(100d));
+    when(accountRepository.findById(accountId)).thenReturn(Mono.just(account));
+    var transaction = new Transaction();
+    transaction.setAmount(100d);
+    when(transactionRepository.findByAccountIdAndRegisterDateBetween(Mockito.any(), Mockito.any(), Mockito.any())).thenReturn(Flux.just(transaction));
+    var mono = accountService.getBalanceByAccountId(accountId);
+    StepVerifier.create(mono).assertNext(balance -> {
+      assertThat(balance.getAmount()).isEqualTo(100d);
+    }).verifyComplete();
+  }
+  
+  @Test
+  public void getTransactionsByAccountAndPeriod() {
+    
+    String accountId = "ACC123";
+    when(transactionRepository.findByAccountIdAndRegisterDateBetween(Mockito.any(), Mockito.any(), Mockito.any()))
+      .thenReturn(Flux.just(new Transaction()));
+    var flux = accountService.getTransactionsByAccountIdAndPeriod(accountId, LocalDate.of(2022, 4, 1));
+    StepVerifier.create(flux).assertNext(tx -> {
+      assertThat(tx).isNotNull();
+    }).verifyComplete();
   }
   
 
