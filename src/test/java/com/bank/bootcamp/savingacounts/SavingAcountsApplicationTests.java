@@ -66,6 +66,11 @@ public class SavingAcountsApplicationTests {
   @Test
   public void createPositiveTransactionWithExistentAccount() throws Exception {
     var accountId = "acc123";
+    
+    var account = new Account();
+    account.setId(accountId);
+    account.setMonthlyMovementLimit(1);
+    
     var createTransactionDTO = new CreateTransactionDTO();
     createTransactionDTO.setAgent("BCP Huacho - Cajero 021");
     createTransactionDTO.setAmount(100d);
@@ -79,7 +84,8 @@ public class SavingAcountsApplicationTests {
     
     when(nextSequenceService.getNextSequence("TransactionSequences")).thenReturn(Mono.just(1));
     when(transactionRepository.getBalanceByAccountId(accountId)).thenReturn(Mono.just(0d));
-    when(accountRepository.findById(accountId)).thenReturn(Mono.just(new Account()));
+    when(accountRepository.findById(accountId)).thenReturn(Mono.just(account));
+    Mockito.doReturn(Flux.empty()).when(transactionRepository).findByAccountIdAndRegisterDateBetween(Mockito.anyString(), Mockito.any(LocalDateTime.class), Mockito.any(LocalDateTime.class));
     Mockito.doReturn(Mono.just(transactionSaved)).when(transactionRepository).save(Mockito.any());
     
     var mono = accountService.createTransaction(createTransactionDTO);

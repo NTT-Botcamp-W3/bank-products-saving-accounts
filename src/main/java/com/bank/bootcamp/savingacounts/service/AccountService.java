@@ -65,8 +65,25 @@ public class AccountService {
         .then(check(createTransactionDTO, dto -> ObjectUtils.isEmpty(dto.getAgent()), "Agent is required"))
         .then(check(createTransactionDTO, dto -> ObjectUtils.isEmpty(dto.getAmount()), "Amount is required"))
         .then(check(createTransactionDTO, dto -> ObjectUtils.isEmpty(dto.getDescription()), "Description is required"))
-        .then(accountRepository.findById(createTransactionDTO.getAccountId()).switchIfEmpty(Mono.error(new BankValidationException("Account not found"))))
-        .flatMap(acc -> transactionRepository.getBalanceByAccountId(createTransactionDTO.getAccountId()).switchIfEmpty(Mono.just(0d)))
+        .then(accountRepository.findById(createTransactionDTO.getAccountId())
+            .switchIfEmpty(Mono.error(new BankValidationException("Account not found")))
+            .flatMap(acc -> {
+              var yearMonth = YearMonth.from(LocalDateTime.now());
+              var currentMonthStart = yearMonth.atDay(1).atStartOfDay();
+              var currentMonthEnd = yearMonth.atEndOfMonth().atTime(23, 59, 59);
+              return transactionRepository.findByAccountIdAndRegisterDateBetween(acc.getId(), currentMonthStart, currentMonthEnd)
+                  .count()
+                  .<Long>handle((register, sink) -> {
+                    if (register >= acc.getMonthlyMovementLimit()) 
+                      sink.error(new BankValidationException(String.format("You can only register a maximum of %s monthly movements", acc.getMonthlyMovementLimit())));
+                    else
+                      sink.next(register);
+                  });
+            })
+        )
+        .flatMap(acc -> {
+          return transactionRepository.getBalanceByAccountId(createTransactionDTO.getAccountId()).switchIfEmpty(Mono.just(0d));
+        })
         .flatMap(balance -> {
           if (balance + createTransactionDTO.getAmount() < 0)
             return Mono.error(new BankValidationException("Insuficient balance"));
