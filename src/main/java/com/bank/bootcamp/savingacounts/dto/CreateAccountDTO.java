@@ -8,4 +8,5 @@ public class CreateAccountDTO {
   private String customerId;
   private Integer monthlyMovementLimit;
   private Double openingAmount;
+  private String profile;
 }

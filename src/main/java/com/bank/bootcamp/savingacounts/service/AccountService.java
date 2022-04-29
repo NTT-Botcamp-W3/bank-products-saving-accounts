@@ -18,6 +18,7 @@ import com.bank.bootcamp.savingacounts.entity.TransactionSequences;
 import com.bank.bootcamp.savingacounts.exception.BankValidationException;
 import com.bank.bootcamp.savingacounts.repository.AccountRepository;
 import com.bank.bootcamp.savingacounts.repository.TransactionRepository;
+import com.bank.bootcamp.savingacounts.webclient.CreditWebClient;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -30,6 +31,7 @@ public class AccountService {
   private final TransactionRepository transactionRepository;
   private final NextSequenceService nextSequenceService;
   private final Environment env;
+  private final CreditWebClient creditWebClient;
   
   private ModelMapper mapper = new ModelMapper();
 
@@ -44,7 +46,18 @@ public class AccountService {
             .<CreateAccountDTO>handle((record, sink) -> sink.error(new BankValidationException("Customer already has an saving account")))
         )
         .switchIfEmpty(Mono.just(dto))
+        .flatMap(createAccountDTO -> {
+            if(!ObjectUtils.isEmpty(dto.getProfile()) && "VIP".equalsIgnoreCase(dto.getProfile())) {
+              return creditWebClient.getAllBalances(dto.getCustomerId())
+                  .switchIfEmpty(Mono.error(new BankValidationException("Customer has not credit product for VIP account")))
+                  .count()
+                  .map(count -> createAccountDTO);
+            } else {
+              return Mono.just(createAccountDTO);
+            }
+        })
         .flatMap(accountDTO -> {
+          
             var acc = mapper.map(accountDTO, Account.class); 
             accountDTO.setMonthlyMovementLimit(Optional.ofNullable(accountDTO.getMonthlyMovementLimit()).orElse(5)); // maximo movimientos mensuales
             return accountRepository.save(acc)

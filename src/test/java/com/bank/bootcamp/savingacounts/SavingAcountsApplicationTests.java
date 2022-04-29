@@ -11,14 +11,17 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.modelmapper.ModelMapper;
 import org.springframework.core.env.Environment;
+import com.bank.bootcamp.savingacounts.dto.BalanceDTO;
 import com.bank.bootcamp.savingacounts.dto.CreateAccountDTO;
 import com.bank.bootcamp.savingacounts.dto.CreateTransactionDTO;
 import com.bank.bootcamp.savingacounts.entity.Account;
 import com.bank.bootcamp.savingacounts.entity.Transaction;
+import com.bank.bootcamp.savingacounts.exception.BankValidationException;
 import com.bank.bootcamp.savingacounts.repository.AccountRepository;
 import com.bank.bootcamp.savingacounts.repository.TransactionRepository;
 import com.bank.bootcamp.savingacounts.service.AccountService;
 import com.bank.bootcamp.savingacounts.service.NextSequenceService;
+import com.bank.bootcamp.savingacounts.webclient.CreditWebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
@@ -31,6 +34,7 @@ public class SavingAcountsApplicationTests {
   private static NextSequenceService nextSequenceService;
   private ModelMapper mapper = new ModelMapper();
   private static Environment env;
+  private static CreditWebClient creditWebClient;
   
   @BeforeAll
   public static void setup() {
@@ -38,7 +42,8 @@ public class SavingAcountsApplicationTests {
     transactionRepository = mock(TransactionRepository.class);
     nextSequenceService = mock(NextSequenceService.class);
     env = mock(Environment.class);
-    accountService = new AccountService(accountRepository, transactionRepository, nextSequenceService, env);
+    creditWebClient = mock(CreditWebClient.class);
+    accountService = new AccountService(accountRepository, transactionRepository, nextSequenceService, env, creditWebClient);
     when(nextSequenceService.getNextSequence("TransactionSequences")).thenReturn(Mono.just(1));
   }
   
@@ -68,6 +73,47 @@ public class SavingAcountsApplicationTests {
       assertThat(acc.getId()).isNotNull();
     }).verifyComplete();
     
+  }
+  
+  @Test
+  public void createVIPAccount() throws Exception {
+    
+    var account = getAccount();
+    var accountDTO = mapper.map(account, CreateAccountDTO.class);
+    accountDTO.setOpeningAmount(100d);
+    accountDTO.setProfile("VIP");
+    
+    var savedAccount = mapper.map(account, Account.class);
+    savedAccount.setId(UUID.randomUUID().toString());
+    
+    when(accountRepository.findByCustomerId(account.getCustomerId())).thenReturn(Mono.empty());
+    when(accountRepository.save(Mockito.any(Account.class))).thenReturn(Mono.just(savedAccount));
+    when(creditWebClient.getAllBalances(account.getCustomerId())).thenReturn(Flux.just(new BalanceDTO()));
+    
+    var mono = accountService.createAccount(accountDTO);
+    StepVerifier.create(mono).assertNext(acc -> {
+      assertThat(acc.getMonthlyMovementLimit()).isEqualTo(10);
+      assertThat(acc.getId()).isNotNull();
+    }).verifyComplete();
+  }
+  
+  @Test
+  public void createVIPAccountFail() throws Exception {
+    
+    var account = getAccount();
+    var accountDTO = mapper.map(account, CreateAccountDTO.class);
+    accountDTO.setOpeningAmount(100d);
+    accountDTO.setProfile("VIP");
+    
+    var savedAccount = mapper.map(account, Account.class);
+    savedAccount.setId(UUID.randomUUID().toString());
+    
+    when(accountRepository.findByCustomerId(account.getCustomerId())).thenReturn(Mono.empty());
+    when(accountRepository.save(Mockito.any(Account.class))).thenReturn(Mono.just(savedAccount));
+    when(creditWebClient.getAllBalances(account.getCustomerId())).thenReturn(Flux.empty());
+    
+    var mono = accountService.createAccount(accountDTO);
+    StepVerifier.create(mono).expectError(BankValidationException.class).verify();
   }
   
   @Test
