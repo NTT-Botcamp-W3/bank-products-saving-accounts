@@ -11,9 +11,11 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.modelmapper.ModelMapper;
 import org.springframework.core.env.Environment;
+import com.bank.bootcamp.savingacounts.dto.AccountType;
 import com.bank.bootcamp.savingacounts.dto.BalanceDTO;
 import com.bank.bootcamp.savingacounts.dto.CreateAccountDTO;
 import com.bank.bootcamp.savingacounts.dto.CreateTransactionDTO;
+import com.bank.bootcamp.savingacounts.dto.TransferDTO;
 import com.bank.bootcamp.savingacounts.entity.Account;
 import com.bank.bootcamp.savingacounts.entity.Transaction;
 import com.bank.bootcamp.savingacounts.exception.BankValidationException;
@@ -21,6 +23,7 @@ import com.bank.bootcamp.savingacounts.repository.AccountRepository;
 import com.bank.bootcamp.savingacounts.repository.TransactionRepository;
 import com.bank.bootcamp.savingacounts.service.AccountService;
 import com.bank.bootcamp.savingacounts.service.NextSequenceService;
+import com.bank.bootcamp.savingacounts.webclient.AccountWebClient;
 import com.bank.bootcamp.savingacounts.webclient.CreditWebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -35,6 +38,7 @@ public class SavingAcountsApplicationTests {
   private ModelMapper mapper = new ModelMapper();
   private static Environment env;
   private static CreditWebClient creditWebClient;
+  private static AccountWebClient accountWebClient;
   
   @BeforeAll
   public static void setup() {
@@ -43,7 +47,8 @@ public class SavingAcountsApplicationTests {
     nextSequenceService = mock(NextSequenceService.class);
     env = mock(Environment.class);
     creditWebClient = mock(CreditWebClient.class);
-    accountService = new AccountService(accountRepository, transactionRepository, nextSequenceService, env, creditWebClient);
+    accountWebClient = mock(AccountWebClient.class);
+    accountService = new AccountService(accountRepository, transactionRepository, nextSequenceService, env, creditWebClient, accountWebClient);
     when(nextSequenceService.getNextSequence("TransactionSequences")).thenReturn(Mono.just(1));
   }
   
@@ -220,6 +225,43 @@ public class SavingAcountsApplicationTests {
     var flux = accountService.getTransactionsByAccountIdAndPeriod(accountId, LocalDate.of(2022, 4, 1));
     StepVerifier.create(flux).assertNext(tx -> {
       assertThat(tx).isNotNull();
+    }).verifyComplete();
+  }
+  
+  @Test
+  public void transfer() {
+    var transferDTO = new TransferDTO();
+    transferDTO.setAmount(100d);
+    transferDTO.setSourceAccountId("CA-001");
+    transferDTO.setTargetAccountType(AccountType.SAVING);
+    transferDTO.setTargetAccountId("SA-001");
+    var amount = 100d;
+    //  /transfer
+    when(nextSequenceService.getNextSequence("TransactionSequences")).thenReturn(Mono.just(1));
+    when(transactionRepository.getBalanceByAccountId(transferDTO.getSourceAccountId())).thenReturn(Mono.just(amount));
+    
+    var account = new Account();
+    account.setMonthlyMovementLimit(10);
+    when(accountRepository.findById(transferDTO.getSourceAccountId())).thenReturn(Mono.just(account));
+    
+    var existentTransaction = new Transaction();
+    existentTransaction.setAmount(100d);
+    
+    when(transactionRepository.findByAccountIdAndRegisterDateBetween(Mockito.anyString(), Mockito.any(LocalDateTime.class), Mockito.any(LocalDateTime.class))).thenReturn(Flux.just(existentTransaction));
+    
+    var tx = new Transaction();
+    tx.setAccountId(transferDTO.getSourceAccountId());
+    tx.setAgent("-");
+    tx.setOperationNumber(1);
+    tx.setAmount(amount);
+    tx.setId(UUID.randomUUID().toString());
+    tx.setRegisterDate(LocalDateTime.now());
+    
+    when(transactionRepository.save(Mockito.any(Transaction.class))).thenReturn(Mono.just(tx));
+    when(accountWebClient.createTransaction(Mockito.any(AccountType.class), Mockito.any(CreateTransactionDTO.class))).thenReturn(Mono.just(4));
+    var mono = accountService.transfer(transferDTO);
+    StepVerifier.create(mono).assertNext(operationNumber -> {
+      assertThat(operationNumber).isNotNull();
     }).verifyComplete();
   }
   

@@ -12,12 +12,15 @@ import org.springframework.util.ObjectUtils;
 import com.bank.bootcamp.savingacounts.dto.BalanceDTO;
 import com.bank.bootcamp.savingacounts.dto.CreateAccountDTO;
 import com.bank.bootcamp.savingacounts.dto.CreateTransactionDTO;
+import com.bank.bootcamp.savingacounts.dto.TransferDTO;
+import com.bank.bootcamp.savingacounts.dto.TransferOperation;
 import com.bank.bootcamp.savingacounts.entity.Account;
 import com.bank.bootcamp.savingacounts.entity.Transaction;
 import com.bank.bootcamp.savingacounts.entity.TransactionSequences;
 import com.bank.bootcamp.savingacounts.exception.BankValidationException;
 import com.bank.bootcamp.savingacounts.repository.AccountRepository;
 import com.bank.bootcamp.savingacounts.repository.TransactionRepository;
+import com.bank.bootcamp.savingacounts.webclient.AccountWebClient;
 import com.bank.bootcamp.savingacounts.webclient.CreditWebClient;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
@@ -32,6 +35,7 @@ public class AccountService {
   private final NextSequenceService nextSequenceService;
   private final Environment env;
   private final CreditWebClient creditWebClient;
+  private final AccountWebClient accountWebClient;
   
   private ModelMapper mapper = new ModelMapper();
 
@@ -90,8 +94,20 @@ public class AccountService {
       }
     });
   }
+  
+  private Mono<Transaction> persistTransaction(CreateTransactionDTO createTransactionDTO) {
+    return nextSequenceService.getNextSequence(TransactionSequences.class.getSimpleName()).<Transaction>flatMap(nextSeq -> {
+      var transaction = mapper.map(createTransactionDTO, Transaction.class);
+      transaction.setOperationNumber(nextSeq);
+      transaction.setRegisterDate(LocalDateTime.now());
+      return transactionRepository.save(transaction);
+    });
+  }
 
   public Mono<Transaction> createTransaction(CreateTransactionDTO createTransactionDTO) {
+    
+    var maxTransactionsWithFreeComission = Integer.parseInt(Optional.ofNullable(env.getProperty("account.comission-free-maximum-transactions")).orElse("99"));
+    
     return Mono.just(createTransactionDTO)
         .then(check(createTransactionDTO, dto -> Optional.of(dto).isEmpty(), "No data for create transaction"))
         .then(check(createTransactionDTO, dto -> ObjectUtils.isEmpty(dto.getAccountId()), "Account ID is required"))
@@ -119,12 +135,44 @@ public class AccountService {
           if (balance + createTransactionDTO.getAmount() < 0)
             return Mono.error(new BankValidationException("Insuficient balance"));
           else {
-            return nextSequenceService.getNextSequence(TransactionSequences.class.getSimpleName()).<Transaction>flatMap(nextSeq -> {
-              var transaction = mapper.map(createTransactionDTO, Transaction.class);
-              transaction.setOperationNumber(nextSeq);
-              transaction.setRegisterDate(LocalDateTime.now());
-              return transactionRepository.save(transaction);
-            });
+         // Agregamos la validación de la comisión, y si esta puede aplicarse
+            var comissionPercentage = 0.005; // TODO: Este valor está en duro, no especificaron el monto, por ahora es 0.5 %
+            var newAmountWithComissionApply = (Math.abs(createTransactionDTO.getAmount()) * (1d + comissionPercentage)) * -1d;
+            
+            var yearMonth = YearMonth.from(LocalDateTime.now());
+            var currentMonthStart = yearMonth.atDay(1).atStartOfDay();
+            var currentMonthEnd = yearMonth.atEndOfMonth().atTime(23, 59, 59);
+            
+            return transactionRepository.findByAccountIdAndRegisterDateBetween(createTransactionDTO.getAccountId(), currentMonthStart, currentMonthEnd)
+                .count()
+                .<Boolean>handle((transactionCount, sink) -> {                  
+                  if (transactionCount >= maxTransactionsWithFreeComission) {
+                    if (balance + newAmountWithComissionApply < 0) {
+                      sink.error(new BankValidationException("Insuficient balance, can not apply the comission"));
+                    } else {
+                      sink.next(Boolean.TRUE);
+                    }
+                  } else {
+                    sink.next(Boolean.FALSE);
+                  }
+                })
+                .flatMap(persistComission -> {
+                  return persistTransaction(createTransactionDTO)
+                      .flatMap(tx -> {
+                        var monoTx = Mono.just(tx);
+                        if (persistComission) {
+                          var comissionTxDTO = new CreateTransactionDTO();
+                          comissionTxDTO.setAccountId(tx.getAccountId());
+                          comissionTxDTO.setAgent("-");
+                          comissionTxDTO.setAmount(newAmountWithComissionApply);
+                          comissionTxDTO.setCreateByComission(Boolean.TRUE);
+                          comissionTxDTO.setDescription("Maintenance comission by limit transactions");
+                          monoTx = persistTransaction(comissionTxDTO).map(ct -> tx);
+                        }
+                        return monoTx;
+                      })
+                      ;
+                });
             
           }
         });
@@ -190,5 +238,46 @@ public class AccountService {
           var currentMonthEnd = yearMonth.atEndOfMonth().atTime(23, 59, 59);
           return transactionRepository.findByAccountIdAndRegisterDateBetween(accountId, currentMonthStart, currentMonthEnd);
         });
+  }
+  
+  public Mono<Integer> transfer(TransferDTO transferDTO) {
+    var transferOperation = new TransferOperation();
+    return Mono.just(transferDTO)
+        .switchIfEmpty(Mono.error(new BankValidationException("Transfer has not data")))
+        .then(check(transferDTO, dto -> ObjectUtils.isEmpty(dto), "Transfer has not data"))
+        .then(check(transferDTO, dto -> ObjectUtils.isEmpty(dto.getAmount()), "Transfer amount is required"))
+        .then(check(transferDTO, dto -> dto.getAmount() < 0, "Transfer amount must be greater than zero"))
+        .then(check(transferDTO, dto -> ObjectUtils.isEmpty(dto.getSourceAccountId()), "Transfer source account ID is required"))
+        .then(check(transferDTO, dto -> ObjectUtils.isEmpty(dto.getTargetAccountType()), "Transfer account type is required"))
+        .then(check(transferDTO, dto -> ObjectUtils.isEmpty(dto.getTargetAccountId()), "Transfer account ID is required"))
+        .then(accountRepository.findById(transferDTO.getSourceAccountId()).switchIfEmpty(Mono.error(new BankValidationException("Source account not found"))))
+        .flatMap(sourceAccount -> {
+          var transactionDTO = new CreateTransactionDTO();
+          transactionDTO.setAccountId(transferDTO.getSourceAccountId());
+          transactionDTO.setAgent("-");
+          transactionDTO.setDescription("Transfer sent");
+          transactionDTO.setAmount(transferDTO.getAmount() * -1);
+          
+          return createTransaction(transactionDTO)
+              .map(tx -> {
+                transferOperation.setSourceTransactionId(tx.getId());
+                return tx.getOperationNumber();
+              });
+        })
+        .flatMap(operationNumberTarget -> {
+          
+          var transactionDTO = new CreateTransactionDTO();
+          transactionDTO.setAccountId(transferDTO.getTargetAccountId());
+          transactionDTO.setAgent("-");
+          transactionDTO.setDescription("Transfer incoming " + operationNumberTarget);
+          transactionDTO.setAmount(transferDTO.getAmount());
+          
+          return accountWebClient.createTransaction(transferDTO.getTargetAccountType(), transactionDTO)
+              .onErrorResume(Exception.class, e -> {
+                transactionRepository.deleteById(transferOperation.getSourceTransactionId());
+                return Mono.error(new BankValidationException("The operation could not be completed"));
+              });
+        })
+        ;
   }
 }
